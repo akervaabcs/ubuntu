@@ -14,41 +14,47 @@ jobs:
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             xfce4 xfce4-goodies xrdp dbus-x11 \
-            ufw curl
+            ufw curl openssl
 
       - name: Create RDP User with Secure Password
         run: |
-          # Generate a strong random password
-          PASSWORD=$(tr -dc 'A-Za-z0-9!@#$%^&*()_+-=' < /dev/urandom | head -c 20)
+          # Generate strong password
+          PASSWORD=$(openssl rand -base64 18 | tr -d '/+=' | head -c 20)
+          
+          if [ -z "$PASSWORD" ] || [ ${#PASSWORD} -lt 16 ]; then
+            PASSWORD=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*_+-' | fold -w 20 | head -n 1)
+          fi
+          
+          echo "Password length: ${#PASSWORD}"
           
           # Create user
-          sudo useradd -m -s /bin/bash RDP
+          sudo useradd -m -s /bin/bash RDP || true
           echo "RDP:$PASSWORD" | sudo chpasswd
           
-          # Add to necessary groups
           sudo usermod -aG sudo RDP
           sudo usermod -aG ssl-cert RDP
           
-          # Save credentials
           echo "RDP_PASSWORD=$PASSWORD" >> $GITHUB_ENV
-          echo "RDP_CREDS=User: RDP | Password: $PASSWORD" >> $GITHUB_ENV
-          
-          echo "Created user RDP with password: $PASSWORD"
+          echo "Created user RDP"
+          echo "Password: $PASSWORD"
 
-      - name: Configure xrdp + XFCE properly
+      - name: Configure xrdp + XFCE (D-Bus fix)
         run: |
-          # 1. Create proper .xsession for the RDP user
-          sudo -u RDP bash -c 'cat > ~/.xsession << EOF
+          # === Most important part ===
+          # Create a working .xsession that launches D-Bus correctly
+          sudo -u RDP bash -c 'cat > ~/.xsession << "EOF"
           #!/bin/sh
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
           export XDG_CONFIG_DIRS=/etc/xdg
-          exec startxfce4
+          export XDG_SESSION_TYPE=x11
+          exec dbus-launch --exit-with-session startxfce4
           EOF'
+          
           sudo chmod +x /home/RDP/.xsession
           sudo chown RDP:RDP /home/RDP/.xsession
 
-          # 2. Replace system startwm.sh (this is the most important fix)
+          # Also force the system startwm.sh
           sudo tee /etc/xrdp/startwm.sh > /dev/null << 'EOF'
           #!/bin/sh
           if [ -r /etc/default/locale ]; then
@@ -59,17 +65,17 @@ jobs:
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
           export XDG_CONFIG_DIRS=/etc/xdg
+          export XDG_SESSION_TYPE=x11
 
-          # Force XFCE
-          exec startxfce4
+          # Force XFCE with proper D-Bus
+          exec dbus-launch --exit-with-session startxfce4
           EOF
+          
           sudo chmod +x /etc/xrdp/startwm.sh
 
-          # 3. Make sure xrdp user can access certificates
+          # Permissions
           sudo adduser xrdp ssl-cert || true
-
-          # 4. Optional but helpful: create empty config dirs
-          sudo -u RDP mkdir -p /home/RDP/.config /home/RDP/.cache
+          sudo -u RDP mkdir -p /home/RDP/.config /home/RDP/.cache /home/RDP/.local/share
 
       - name: Configure Firewall
         run: |
@@ -91,7 +97,6 @@ jobs:
             --hostname=gh-runner-$GITHUB_RUN_ID \
             --accept-routes
           
-          # Wait for Tailscale IP
           for i in {1..15}; do
             TS_IP=$(tailscale ip -4 2>/dev/null || true)
             if [ -n "$TS_IP" ]; then
@@ -110,32 +115,28 @@ jobs:
 
       - name: Start xrdp services
         run: |
-          # Kill any existing instances first
           sudo pkill -9 xrdp || true
           sudo pkill -9 xrdp-sesman || true
           sleep 1
           
-          # Start cleanly
           sudo /usr/sbin/xrdp-sesman &
           sleep 2
           sudo /usr/sbin/xrdp &
           sleep 3
           
-          echo "xrdp processes:"
+          echo "=== xrdp status ==="
           ps aux | grep -E 'xrdp|sesman' | grep -v grep || true
           ss -tlnp | grep 3389 || true
 
       - name: Maintain Connection
         run: |
           echo ""
-          echo "=========================================="
+          echo "=============================================="
           echo "=== RDP ACCESS (Linux + XFCE) ==="
           echo "Address:   $TAILSCALE_IP"
           echo "Username:  RDP"
           echo "Password:  $RDP_PASSWORD"
-          echo "=========================================="
-          echo ""
-          echo "Connect now using any RDP client."
+          echo "=============================================="
           echo ""
           
           while true; do
