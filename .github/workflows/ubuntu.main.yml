@@ -341,7 +341,7 @@ jobs:
                         echo "❌ RDP_PASSWORD environment variable is not set"
                         exit 1
                     fi
-                    echo "runner:runner" | sudo chpasswd
+                    echo "runner:$RDP_PASSWORD" | sudo chpasswd
                     echo "✅ Password set for user 'runner'"
 
             - name: Create Self-Destruct Script
