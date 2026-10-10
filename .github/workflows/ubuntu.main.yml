@@ -29,45 +29,56 @@ jobs:
           sudo usermod -aG sudo RDP
           sudo usermod -aG ssl-cert RDP
           
-          # Save credentials for later steps
+          # Save credentials
           echo "RDP_PASSWORD=$PASSWORD" >> $GITHUB_ENV
           echo "RDP_CREDS=User: RDP | Password: $PASSWORD" >> $GITHUB_ENV
           
           echo "Created user RDP with password: $PASSWORD"
 
-      - name: Configure xrdp for XFCE
+      - name: Configure xrdp + XFCE properly
         run: |
-          # Tell xrdp to start XFCE
-          echo "startxfce4" | sudo tee /home/RDP/.xsession
-          sudo chown RDP:RDP /home/RDP/.xsession
+          # 1. Create proper .xsession for the RDP user
+          sudo -u RDP bash -c 'cat > ~/.xsession << EOF
+          #!/bin/sh
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          export XDG_CONFIG_DIRS=/etc/xdg
+          exec startxfce4
+          EOF'
           sudo chmod +x /home/RDP/.xsession
-          
-          # Also set system-wide startwm
+          sudo chown RDP:RDP /home/RDP/.xsession
+
+          # 2. Replace system startwm.sh (this is the most important fix)
           sudo tee /etc/xrdp/startwm.sh > /dev/null << 'EOF'
           #!/bin/sh
           if [ -r /etc/default/locale ]; then
             . /etc/default/locale
             export LANG LANGUAGE
           fi
+
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
+          export XDG_CONFIG_DIRS=/etc/xdg
+
+          # Force XFCE
           exec startxfce4
           EOF
           sudo chmod +x /etc/xrdp/startwm.sh
-          
-          # Allow xrdp user to access certificates
+
+          # 3. Make sure xrdp user can access certificates
           sudo adduser xrdp ssl-cert || true
+
+          # 4. Optional but helpful: create empty config dirs
+          sudo -u RDP mkdir -p /home/RDP/.config /home/RDP/.cache
 
       - name: Configure Firewall
         run: |
-          # Reset and configure UFW
           sudo ufw --force reset
           sudo ufw default deny incoming
           sudo ufw default allow outgoing
-          sudo ufw allow 22/tcp          # SSH (just in case)
-          sudo ufw allow 3389/tcp        # RDP
+          sudo ufw allow 22/tcp
+          sudo ufw allow 3389/tcp
           sudo ufw --force enable
-          sudo ufw status
 
       - name: Install Tailscale
         run: |
@@ -99,40 +110,35 @@ jobs:
 
       - name: Start xrdp services
         run: |
-          # Start services manually (more reliable on GitHub runners)
-          sudo /usr/sbin/xrdp-sesman &
+          # Kill any existing instances first
+          sudo pkill -9 xrdp || true
+          sudo pkill -9 xrdp-sesman || true
           sleep 1
-          sudo /usr/sbin/xrdp &
+          
+          # Start cleanly
+          sudo /usr/sbin/xrdp-sesman &
           sleep 2
+          sudo /usr/sbin/xrdp &
+          sleep 3
           
-          # Verify it's listening
-          ss -tlnp | grep 3389 || netstat -tlnp | grep 3389 || true
-
-      - name: Verify RDP Accessibility
-        run: |
-          echo "Tailscale IP: $TAILSCALE_IP"
-          
-          # Simple port check
-          if timeout 5 bash -c "echo > /dev/tcp/$TAILSCALE_IP/3389" 2>/dev/null; then
-            echo "TCP connectivity to 3389 successful!"
-          else
-            echo "Warning: Could not verify TCP connectivity (may still work)"
-          fi
+          echo "xrdp processes:"
+          ps aux | grep -E 'xrdp|sesman' | grep -v grep || true
+          ss -tlnp | grep 3389 || true
 
       - name: Maintain Connection
         run: |
           echo ""
-          echo "=== RDP ACCESS (Linux) ==="
+          echo "=========================================="
+          echo "=== RDP ACCESS (Linux + XFCE) ==="
           echo "Address:   $TAILSCALE_IP"
           echo "Username:  RDP"
           echo "Password:  $RDP_PASSWORD"
-          echo "=========================="
+          echo "=========================================="
           echo ""
-          echo "Connect using any RDP client (Windows MSTSC, Microsoft Remote Desktop, Remmina, etc.)"
+          echo "Connect now using any RDP client."
           echo ""
           
-          # Keep the runner alive
           while true; do
-            echo "[$(date)] RDP Active - Cancel the workflow to terminate"
+            echo "[$(date)] RDP Active - Cancel workflow to stop"
             sleep 300
           done
